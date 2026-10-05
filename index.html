@@ -854,6 +854,8 @@ let aiAnalysisResults = [];
 let stream = null;
 let recognition = null;
 let isListening = false;
+let recognitionRestartTimer = null;
+let recognitionStarting = false;
 let timerInterval = null;
 let seconds = 0;
 let finalTranscript = "";
@@ -2127,243 +2129,226 @@ function startAnswering(){
   deliveryTotalPauseMs = 0;
   deliveryStarted = false;
 
-
-  /* =====================================================
-     BROWSER SPEECH RECOGNITION ONLY
-     No Vercel STT / MediaRecorder / server transcription.
-  ===================================================== */
-
   const SpeechRecognition =
     window.SpeechRecognition ||
     window.webkitSpeechRecognition;
 
-
   if(!SpeechRecognition){
-
     document.getElementById("transcript").textContent =
-      "❌ Speech Recognition tidak disokong oleh browser ini. Sila gunakan Google Chrome.";
-
+      "❌ Speech Recognition tidak disokong oleh browser ini.";
     return;
-
   }
 
+  // Stop/clean any previous instance without allowing it to restart.
+  isListening = false;
+  recognitionStarting = false;
 
-  /* Stop any previous recognition instance */
+  if(recognitionRestartTimer){
+    clearTimeout(recognitionRestartTimer);
+    recognitionRestartTimer = null;
+  }
+
   if(recognition){
-
     try{
       recognition.onend = null;
+      recognition.onerror = null;
       recognition.stop();
-    }
-    catch(error){
-      console.log("Previous recognition stopped.", error);
-    }
-
+    }catch(error){}
+    recognition = null;
   }
-
 
   if(timerInterval){
     clearInterval(timerInterval);
     timerInterval = null;
   }
 
-
   finalTranscript = "";
   seconds = 0;
-  isListening = false;
   updateTimer();
 
+  // User has explicitly started answering.
+  isListening = true;
 
-  recognition = new SpeechRecognition();
+  const startBtn = document.getElementById("startAnswer");
+  const stopBtn = document.getElementById("stopBtn");
+  const transcriptEl = document.getElementById("transcript");
 
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.maxAlternatives = 1;
+  if(startBtn) startBtn.style.display = "none";
+  if(stopBtn) stopBtn.style.display = "inline-block";
+  if(transcriptEl) transcriptEl.textContent = "🎤 Listening... Sila mula bercakap.";
 
-  recognition.lang =
-    INTERVIEW_LANGUAGE === "Malay"
-      ? "ms-MY"
-      : "en-US";
-
-
-  recognition.onstart = function(){
-
-    isListening = true;
-
-    const startBtn = document.getElementById("startAnswer");
-    const stopBtn = document.getElementById("stopBtn");
-    const transcript = document.getElementById("transcript");
-
-    if(startBtn){
-      startBtn.style.display = "none";
+  timerInterval = setInterval(function(){
+    if(isListening){
+      seconds++;
+      updateTimer();
     }
+  },1000);
 
-    if(stopBtn){
-      stopBtn.style.display = "inline-block";
-    }
-
-    if(transcript){
-      transcript.textContent =
-        finalTranscript.trim() || "🎤 Listening... Sila mula bercakap.";
-    }
-
-    if(timerInterval){
-      clearInterval(timerInterval);
-    }
-
-    timerInterval = setInterval(function(){
-      if(isListening){
-        seconds++;
-        updateTimer();
-      }
-    }, 1000);
-
-  };
-
-
-  recognition.onresult = function(event){
-
-    const deliveryNow = Date.now();
-
-    if(deliveryStarted && deliveryLastSpeechResultAt){
-      const deliveryGap = deliveryNow - deliveryLastSpeechResultAt;
-
-      // Only count a clearly noticeable gap.
-      // This is an estimate based on browser recognition timing,
-      // not a medical/clinical stuttering measurement.
-      if(deliveryGap >= LONG_PAUSE_MS){
-        deliveryPauseCount++;
-        deliveryTotalPauseMs += deliveryGap;
-        deliveryLongestPauseMs =
-          Math.max(deliveryLongestPauseMs, deliveryGap);
-      }
-    }
-
-    deliveryStarted = true;
-    deliveryLastSpeechResultAt = deliveryNow;
-
-
-    let interim = "";
-
-    for(
-      let i = event.resultIndex;
-      i < event.results.length;
-      i++
-    ){
-
-      const text =
-        event.results[i][0].transcript.trim();
-
-      if(!text) continue;
-
-      if(event.results[i].isFinal){
-        finalTranscript += " " + text;
-      }
-      else{
-        interim += " " + text;
-      }
-
-    }
-
-
-    const combined =
-      (finalTranscript + " " + interim)
-        .replace(/\\s+/g, " ")
-        .trim();
-
-
-    const transcript = document.getElementById("transcript");
-    const answerBox = document.getElementById("answerBox");
-
-    if(transcript){
-      transcript.textContent =
-        combined || "🎤 Listening... Sila mula bercakap.";
-    }
-
-    if(answerBox){
-      answerBox.value = combined;
-    }
-
-    // Analyse the transcript continuously while the user is speaking.
-    // This updates filler/stuttering counts as soon as the browser
-    // includes those sounds/words in the transcript.
-    displaySpeechAnalysis(combined);
-
-  };
-
-
-  recognition.onerror = function(event){
-
-    console.error("Speech Recognition error:", event.error, event);
-
-    const transcript = document.getElementById("transcript");
-
-    const messages = {
-      "not-allowed": "❌ Microphone tidak dibenarkan. Klik 🔒 pada address bar → Microphone → Allow.",
-      "service-not-allowed": "❌ Browser tidak membenarkan Speech Recognition. Cuba Google Chrome.",
-      "audio-capture": "❌ Microphone tidak dapat digunakan. Pastikan microphone tidak digunakan oleh aplikasi lain.",
-      "network": "❌ Speech Recognition memerlukan sambungan internet. Semak internet dan cuba lagi.",
-      "aborted": "⚠️ Speech Recognition dihentikan.",
-      "no-speech": "⚠️ Tiada suara dikesan. Cuba bercakap lebih dekat dengan microphone."
-    };
-
-    if(transcript){
-      transcript.textContent =
-        messages[event.error] ||
-        ("❌ Speech Recognition error: " + event.error);
-    }
-
-    /* Permission / microphone errors should stop restarting */
-    if(
-      event.error === "not-allowed" ||
-      event.error === "service-not-allowed" ||
-      event.error === "audio-capture"
-    ){
-      isListening = false;
-    }
-
-  };
-
-
-  recognition.onend = function(){
-
+  function scheduleRecognitionRestart(delay){
     if(!isListening) return;
 
+    if(recognitionRestartTimer){
+      clearTimeout(recognitionRestartTimer);
+    }
 
-    /* Chrome Speech Recognition can end automatically.
-       Restart it while the user is still answering. */
-    setTimeout(function(){
+    recognitionRestartTimer = setTimeout(function(){
+      recognitionRestartTimer = null;
 
-      if(!isListening || !recognition) return;
+      if(!isListening || recognitionStarting) return;
 
-      try{
-        recognition.start();
-      }
-      catch(error){
-        console.log("Speech recognition restart skipped.", error);
-      }
-
-    }, 150);
-
-  };
-
-
-  try{
-
-    recognition.start();
-
-  }
-  catch(error){
-
-    console.error("Speech recognition could not start:", error);
-
-    isListening = false;
-
-    document.getElementById("transcript").textContent =
-      "❌ Tidak dapat memulakan Speech Recognition. Sila pastikan microphone dibenarkan dan gunakan Google Chrome.";
-
+      startRecognitionCycle();
+    }, delay || 350);
   }
 
+  function startRecognitionCycle(){
+    if(!isListening || recognitionStarting) return;
+
+    recognitionStarting = true;
+
+    const instance = new SpeechRecognition();
+    recognition = instance;
+
+    // Safari/iPad can stop continuous recognition unexpectedly.
+    // Using short recognition cycles + automatic restart is more reliable.
+    instance.continuous = false;
+    instance.interimResults = true;
+    instance.maxAlternatives = 1;
+    instance.lang =
+      INTERVIEW_LANGUAGE === "Malay"
+        ? "ms-MY"
+        : "en-US";
+
+    instance.onstart = function(){
+      recognitionStarting = false;
+
+      const transcript = document.getElementById("transcript");
+      if(transcript && !finalTranscript.trim()){
+        transcript.textContent = "🎤 Listening... Sila mula bercakap.";
+      }
+    };
+
+    instance.onresult = function(event){
+      const deliveryNow = Date.now();
+
+      if(deliveryStarted && deliveryLastSpeechResultAt){
+        const deliveryGap = deliveryNow - deliveryLastSpeechResultAt;
+
+        if(deliveryGap >= LONG_PAUSE_MS){
+          deliveryPauseCount++;
+          deliveryTotalPauseMs += deliveryGap;
+          deliveryLongestPauseMs =
+            Math.max(deliveryLongestPauseMs, deliveryGap);
+        }
+      }
+
+      deliveryStarted = true;
+      deliveryLastSpeechResultAt = deliveryNow;
+
+      let interim = "";
+
+      for(let i = event.resultIndex; i < event.results.length; i++){
+        const spokenText =
+          String(event.results[i][0].transcript || "").trim();
+
+        if(!spokenText) continue;
+
+        if(event.results[i].isFinal){
+          finalTranscript += " " + spokenText;
+        }else{
+          interim += " " + spokenText;
+        }
+      }
+
+      const combined =
+        (finalTranscript + " " + interim)
+          .replace(/\s+/g," ")
+          .trim();
+
+      const transcript = document.getElementById("transcript");
+      const answerBox = document.getElementById("answerBox");
+
+      if(transcript){
+        transcript.textContent =
+          combined || "🎤 Listening... Sila mula bercakap.";
+      }
+
+      if(answerBox){
+        answerBox.value = combined;
+      }
+
+      displaySpeechAnalysis(combined);
+    };
+
+    instance.onerror = function(event){
+      recognitionStarting = false;
+
+      console.warn("Speech Recognition error:", event.error, event);
+
+      // These are real blocking errors: do not auto-restart.
+      if(
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed" ||
+        event.error === "audio-capture"
+      ){
+        isListening = false;
+
+        const transcript = document.getElementById("transcript");
+        const messages = {
+          "not-allowed":
+            "❌ Microphone tidak dibenarkan. Benarkan microphone dalam browser settings.",
+          "service-not-allowed":
+            "❌ Browser tidak membenarkan Speech Recognition.",
+          "audio-capture":
+            "❌ Microphone tidak dapat digunakan."
+        };
+
+        if(transcript){
+          transcript.textContent = messages[event.error];
+        }
+
+        if(timerInterval){
+          clearInterval(timerInterval);
+          timerInterval = null;
+        }
+
+        if(startBtn) startBtn.style.display = "inline-block";
+        if(stopBtn) stopBtn.style.display = "none";
+        return;
+      }
+
+      // Safari/iPad may report aborted/no-speech/network while ending a
+      // recognition cycle. Keep the user's transcript and let onend restart.
+      if(
+        event.error === "aborted" ||
+        event.error === "no-speech" ||
+        event.error === "network"
+      ){
+        return;
+      }
+    };
+
+    instance.onend = function(){
+      recognitionStarting = false;
+
+      // If the user did not press Stop, continue listening automatically.
+      if(isListening){
+        scheduleRecognitionRestart(350);
+      }
+    };
+
+    try{
+      instance.start();
+    }catch(error){
+      recognitionStarting = false;
+      console.warn("Speech Recognition start retry:", error);
+
+      if(isListening){
+        scheduleRecognitionRestart(600);
+      }
+    }
+  }
+
+  startRecognitionCycle();
 }
 
 
@@ -2374,6 +2359,12 @@ function startAnswering(){
 function stopAnswering(){
 
   isListening = false;
+  recognitionStarting = false;
+
+  if(recognitionRestartTimer){
+    clearTimeout(recognitionRestartTimer);
+    recognitionRestartTimer = null;
+  }
 
 
   if(recognition){
